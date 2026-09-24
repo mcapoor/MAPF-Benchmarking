@@ -1,0 +1,5 @@
+__pycache__/
+logs/
+output/
+*.mp4
+.claude/settings.local.json

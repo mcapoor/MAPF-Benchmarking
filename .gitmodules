@@ -1,0 +1,3 @@
+[submodule "libs/libMultiRobotPlanning"]
+	path = libs/libMultiRobotPlanning
+	url = git@github.com:mcapoor/libMultiRobotPlanning.git
