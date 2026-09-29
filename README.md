@@ -9,17 +9,13 @@ A harness for running and comparing multi-agent path finding (MAPF) solvers from
 - [Problems](#problems)
   - [MovingAI scenarios (the default)](#movingai-scenarios-the-default)
   - [libMultiRobotPlanning's YAML format](#libmultirobotplannings-yaml-format)
-- [Solving one problem: `tools/solve_and_visualize.py`](#solving-one-problem-toolssolve_and_visualizepy)
-- [Comparing solvers' paths: `tools/compare_solutions.py`](#comparing-solvers-paths-toolscompare_solutionspy)
-- [Calling solvers from Python: `tools/*_wrappers.py`](#calling-solvers-from-python-tools_wrapperspy)
+- [Tools](#tools)
+  - [Solving one problem: `tools/solve_and_visualize.py`](#solving-one-problem-toolssolve_and_visualizepy)
+  - [Comparing solvers' paths: `tools/compare_solutions.py`](#comparing-solvers-paths-toolscompare_solutionspy)
+  - [Calling solvers from Python: `tools/*_wrappers.py`](#calling-solvers-from-python-tools_wrapperspy)
 - [Benchmarking: `benchmark.py`](#benchmarking-benchmarkpy)
   - [MAPFAST dataset](#mapfast-dataset)
 - [Running on a Slurm cluster](#running-on-a-slurm-cluster)
-  - [1. Clone](#1-clone)
-  - [2. Set up Python and build the solvers](#2-set-up-python-and-build-the-solvers)
-  - [3. Test the stack: `test_cluster.sh`](#3-test-the-stack-test_clustersh)
-  - [4. Run the full benchmark: `benchmark.sh`](#4-run-the-full-benchmark-benchmarksh)
-  - [5. Copy the results back](#5-copy-the-results-back)
 - [Adding a solver library](#adding-a-solver-library)
 
 ## Layout
@@ -136,7 +132,8 @@ The task-assignment solvers (`cbs_ta`, `ecbs_ta`) read a `potentialGoals` list p
 
 Roadmap problems (for `cbs_roadmap`) have agents that start and end at named vertices, and a `roadmap` section.
 
-## Solving one problem: `tools/solve_and_visualize.py`
+## Tools
+### Solving one problem: `tools/solve_and_visualize.py`
 
 ```sh
 python tools/solve_and_visualize.py <problem.yaml> <solver> [options]
@@ -169,7 +166,7 @@ Solvers: `cbs`, `cbs_ta`, `ecbs`, `ecbs_ta`, `mapf_prioritized_sipp`, `mcts_nono
 
 The success message gives the wall time, the sum of costs and the makespan of the solution (computed as in `benchmark.py`). The exit status is 1 if the solver found no solution. The same functionality is available from Python as `solve_and_visualize(...)`, and as `solve(...)` (returns `(result, seconds)`) with the input from `solver_input(problem_file, solver, n_agents)`.
 
-## Comparing solvers' paths: `tools/compare_solutions.py`
+### Comparing solvers' paths: `tools/compare_solutions.py`
 
 ```sh
 python tools/compare_solutions.py <problem.yaml | scenario.scen> --solvers S [S ...] [options]
@@ -196,7 +193,7 @@ Solves one problem (as for `solve_and_visualize.py`, a YAML file or the first N 
 | `--output FILE` | Save to FILE (an image, or `.mp4`/`.gif` with `--animate`) instead of showing it |
 | `--speed N` | Animation speed-up factor (default 1) |
 
-## Calling solvers from Python: `tools/*_wrappers.py`
+### Calling solvers from Python: `tools/*_wrappers.py`
 
 `tools/libMRP_wrappers.py` has one function per libMultiRobotPlanning binary: `cbs`, `cbs_ta`, `ecbs`, `ecbs_ta`, `cbs_roadmap`, `mapf_prioritized_sipp`, `sipp`, `a_star`, `a_star_epsilon`, `assignment` and `next_best_assignment`. `tools/mcts_wrappers.py` has `mcts_nonoverlap`, which reads the same YAML format. Each runs the binary and returns its parsed YAML output, or `None` if there was no solution. Common keyword arguments are `timeout` (seconds; raises `subprocess.TimeoutExpired`), `output` (keep the raw output file), `quiet`, and for the MAPF solvers `create_video` / `video`.
 
@@ -270,7 +267,7 @@ The solvers you run are MAPFAST's portfolio: list them as the `mapping` in its `
 
 ## Running on a Slurm cluster
 
-The full benchmark (every map, every agent count, 25 scenario files each) takes most of a compute allocation, so the steps below test the whole stack on small problems first. Run all of them on a login node of the cluster, from the repository directory. The commands use the Oscar cluster's module names; use your cluster's equivalents.
+The full benchmark (every map, every agent count, 25 scenario files each) is a heavy compute load so the steps below test the whole stack on small problems first. Run all of them on an interact node of the cluster, from the repository directory. The commands use the Oscar cluster's module names; use your cluster's equivalents.
 
 ### 1. Clone
 
@@ -297,14 +294,13 @@ git submodule status
 
 ```sh
 module load python boost yaml-cpp gurobi
-python -m venv ~/venvs/mapf
-source ~/venvs/mapf/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install pyyaml numpy matplotlib
 JOBS=4 ./build.sh
 ```
 
 - The jobs inherit the environment they are submitted from, so **activate the virtual environment in every new shell before submitting** (step 3 and 4). `benchmark.sh` loads `boost yaml-cpp gurobi` in each job itself; edit that `module load` line if your cluster names the modules differently.
-- The solvers must be compiled on the cluster, not copied from another machine. If your cluster discourages heavy compiling on login nodes, build in an interactive job instead, e.g. `srun -c 4 --mem 16G -t 1:00:00 --pty bash`. `JOBS=4` keeps bcp2-mapf's build from running out of memory.
 - `build.sh` ends with `built: libmrp mcts cbsh2 bcp2 reloc`, or `failed: ...` naming the libraries to fix (the error is further up in its output).
 
 ### 3. Test the stack: `test_cluster.sh`
