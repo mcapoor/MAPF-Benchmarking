@@ -1,5 +1,7 @@
 __pycache__/
 logs/
 output/
+cache/
 *.mp4
 .claude/settings.local.json
+libs/mcts_nonoverlap/build/

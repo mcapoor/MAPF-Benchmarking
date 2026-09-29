@@ -1,3 +1,15 @@
 [submodule "libs/libMultiRobotPlanning"]
 	path = libs/libMultiRobotPlanning
 	url = git@github.com:mcapoor/libMultiRobotPlanning.git
+[submodule "libs/bcp2-mapf"]
+	path = libs/bcp2-mapf
+	url = git@github.com:mcapoor/bcp2-mapf.git
+[submodule "libs/CBSH2-RTC-CHBP"]
+	path = libs/CBSH2-RTC-CHBP
+	url = git@github.com:mcapoor/CBSH2-RTC-CHBP.git
+[submodule "libs/reLOC"]
+	path = libs/reLOC
+	url = git@github.com:mcapoor/reLOC.git
+[submodule "benchmarks"]
+	path = benchmarks
+	url = git@github.com:mcapoor/MovingAI-MAPF-Benchmarks.git
