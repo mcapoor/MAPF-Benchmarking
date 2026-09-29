@@ -2,6 +2,26 @@
 
 A harness for running and comparing multi-agent path finding (MAPF) solvers from different libraries on the same benchmark scenarios. Each solver library is a git submodule in `libs/` and stays as close to its own upstream as possible. The scripts here translate between the libraries and one common problem/result format, run the solvers, and collect the timings.
 
+## Contents
+
+- [Layout](#layout)
+- [Setup](#setup)
+- [Problems](#problems)
+  - [MovingAI scenarios (the default)](#movingai-scenarios-the-default)
+  - [libMultiRobotPlanning's YAML format](#libmultirobotplannings-yaml-format)
+- [Solving one problem: `tools/solve_and_visualize.py`](#solving-one-problem-toolssolve_and_visualizepy)
+- [Comparing solvers' paths: `tools/compare_solutions.py`](#comparing-solvers-paths-toolscompare_solutionspy)
+- [Calling solvers from Python: `tools/*_wrappers.py`](#calling-solvers-from-python-tools_wrapperspy)
+- [Benchmarking: `benchmark.py`](#benchmarking-benchmarkpy)
+  - [MAPFAST dataset](#mapfast-dataset)
+- [Running on a Slurm cluster](#running-on-a-slurm-cluster)
+  - [1. Clone](#1-clone)
+  - [2. Set up Python and build the solvers](#2-set-up-python-and-build-the-solvers)
+  - [3. Test the stack: `test_cluster.sh`](#3-test-the-stack-test_clustersh)
+  - [4. Run the full benchmark: `benchmark.sh`](#4-run-the-full-benchmark-benchmarksh)
+  - [5. Copy the results back](#5-copy-the-results-back)
+- [Adding a solver library](#adding-a-solver-library)
+
 ## Layout
 
 | Path | Contents |
@@ -19,7 +39,10 @@ A harness for running and comparing multi-agent path finding (MAPF) solvers from
 | `tools/standard_benchmark_converter.py` | Converts MovingAI problems to libMultiRobotPlanning's YAML format |
 | `benchmark.py` | Benchmark runner: time every solver on a scenario directory |
 | `build.sh` | Builds the solver libraries (see [Setup](#setup)) |
-| `benchmark.sh` | Slurm launcher for `benchmark.py` |
+| `benchmark.sh` | Slurm launcher for `benchmark.py`: one map, or every map with one job each (see [Running on a Slurm cluster](#running-on-a-slurm-cluster)) |
+| `test_cluster.sh` | Small end-to-end test of the cluster setup, to run before the full benchmark |
+| `tools/aggregate.py` | Merges the output files of several `benchmark.py` runs (e.g. one per map) |
+| `tools/check_benchmark.py` | The checks `test_cluster.sh` runs: the setup before submitting, and the results after |
 | `benchmarks/` | The [Moving AI MAPF benchmarks](https://movingai.com/benchmarks/mapf/index.html), one directory per map with its random and even scenarios (see [Problems](#problems)) |
 | `cache/` | Problems converted for a library's own format, reused between runs (not tracked by git) |
 | `output/` | Results of `benchmark.py` runs (not tracked by git) |
@@ -29,7 +52,8 @@ A harness for running and comparing multi-agent path finding (MAPF) solvers from
 Clone with the submodules, then build every library with `build.sh`:
 
 ```sh
-git clone --recurse-submodules <this repo>
+git clone --recurse-submodules git@github.com:mcapoor/MAPF-Benchmarking.git
+cd MAPF-Benchmarking
 ./build.sh                  # all libraries, each into libs/<library>/build/
 ./build.sh cbsh2 bcp2       # only some of them (libmrp, mcts, cbsh2, bcp2, reloc)
 ./build.sh --clean libmrp   # delete the build/ directory first
@@ -50,6 +74,16 @@ Python 3.9+ with the libraries' requirements:
 
 ```sh
 pip install -r libs/libMultiRobotPlanning/requirements.txt
+```
+
+(`pyyaml numpy matplotlib` are enough for everything but `cbs_roadmap --annotate`, which also needs `cvxpy`.)
+
+To update a clone later, pull the submodules too, and rebuild if a solver library changed:
+
+```sh
+git pull
+git submodule update --init --recursive
+./build.sh
 ```
 
 Saving an animation to a video (`--video`) also needs `ffmpeg` on your `PATH`.
@@ -234,19 +268,106 @@ The three JSON files are the dataset the MAPFAST algorithm selector trains on. A
 
 The solvers you run are MAPFAST's portfolio: list them as the `mapping` in its `config.json`, e.g. `{"cbs": 0, "ecbs": 1}` for `--solvers cbs ecbs`. The `_ta` solvers solve the relaxed problem in which any agent may take any goal, so leave them out of `--solvers` if they should not compete. MAPFAST also needs an input image (or `.npz`) per instance, named like the instance file, which `benchmark.py` does not create.
 
-### On a Slurm cluster: `benchmark.sh`
+## Running on a Slurm cluster
+
+The full benchmark (every map, every agent count, 25 scenario files each) takes most of a compute allocation, so the steps below test the whole stack on small problems first. Run all of them on a login node of the cluster, from the repository directory. The commands use the Oscar cluster's module names; use your cluster's equivalents.
+
+### 1. Clone
 
 ```sh
-./benchmark.sh [scenario] [extra benchmark.py arguments]
-./benchmark.sh empty-8-8 --agents 10 20 30 --timeout 5
+git clone --recurse-submodules git@github.com:mcapoor/MAPF-Benchmarking.git
+cd MAPF-Benchmarking
 ```
 
-The script submits itself with `sbatch` (1 node, 12 CPUs, 16 GB, 1 hour; edit the `#SBATCH` lines to change this) and runs `benchmark.py` with `--jobs` set to the allocated CPUs and `--name <scenario>_<job id>`, so jobs never overwrite each other's results:
+The submodule URLs in `.gitmodules` are SSH URLs, so the cluster needs an SSH key registered with GitHub even if you clone this repository over HTTPS. All the repositories are public, so without a key you can make git fetch them over HTTPS instead, before cloning:
 
-- `logs/mapf_benchmark_<id>.out` / `.err`: progress, one line per solver and agent count
-- `output/<scenario>_<id>_*`: the plot, the CSV and the MAPFAST files described above
+```sh
+git config --global url."https://github.com/".insteadOf git@github.com:
+```
 
-If your cluster needs it, uncomment the `module load python` line in `benchmark.sh`.
+Check that every submodule is checked out (no line starts with `-`, which marks one that is not):
+
+```sh
+git submodule status
+```
+
+`benchmarks/` is a submodule too, so if it is empty, `git submodule update --init --recursive` fetches it.
+
+### 2. Set up Python and build the solvers
+
+```sh
+module load python boost yaml-cpp gurobi
+python -m venv ~/venvs/mapf
+source ~/venvs/mapf/bin/activate
+pip install pyyaml numpy matplotlib
+JOBS=4 ./build.sh
+```
+
+- The jobs inherit the environment they are submitted from, so **activate the virtual environment in every new shell before submitting** (step 3 and 4). `benchmark.sh` loads `boost yaml-cpp gurobi` in each job itself; edit that `module load` line if your cluster names the modules differently.
+- The solvers must be compiled on the cluster, not copied from another machine. If your cluster discourages heavy compiling on login nodes, build in an interactive job instead, e.g. `srun -c 4 --mem 16G -t 1:00:00 --pty bash`. `JOBS=4` keeps bcp2-mapf's build from running out of memory.
+- `build.sh` ends with `built: libmrp mcts cbsh2 bcp2 reloc`, or `failed: ...` naming the libraries to fix (the error is further up in its output).
+
+### 3. Test the stack: `test_cluster.sh`
+
+```sh
+./test_cluster.sh
+```
+
+It runs in three stages, and stops at the first if that fails:
+
+1. **Preflight, on the login node (seconds).** Every solver that `benchmark.sh` runs is built and finds its shared libraries; every map in `benchmarks/` has its `.map` and 25 random and 25 even scenario files, which load; `sbatch` is available and `output/`, `logs/` and `cache/` are writable. It prints `PASS`, or a `FAIL:` line per problem, and submits nothing if one fails.
+2. **A small benchmark run.** `benchmark.sh` itself, with the same solvers, jobs and aggregate job as the full run, on 7 maps from 8×8 to the largest (`orz900d`): 2 and 4 agents on 2 scenario files each, a 20 second solver timeout and a 15 minute job limit. Change the maps with `MAPS="empty-8-8 den312d" ./test_cluster.sh`.
+3. **A check job, `mapf_test_check`,** that runs after the aggregate job. It fails if a map's results are incomplete (its job crashed or ran out of time), if a solver solved nothing (it does not work on the compute nodes, e.g. bcp2 without a Gurobi license there), if any solver missed a problem on `empty-8-8` or the optimal solvers disagree on its sums of costs, or if the MAPFAST files do not hold exactly the solved problems. Unsolved problems on the large maps are only warnings.
+
+The test uses 7 jobs of 12 CPUs for a few minutes each (at most 15 minutes each). Follow it with `squeue -u $USER`; when the queue is empty, the verdict is the end of the check job's log:
+
+```sh
+tail -n 20 logs/mapf_test_check_*.out    # a solved/total table per solver and map, then PASS or FAIL
+```
+
+On `FAIL`, each `FAIL:` line names the map or solver, and the job logs `logs/mapf_benchmark_<map>_<id>.out` / `.err` show what went wrong. Fix it and run `./test_cluster.sh` again before step 4.
+
+### 4. Run the full benchmark: `benchmark.sh`
+
+```sh
+./benchmark.sh                          # every map, random scenarios
+./benchmark.sh --scen-type even         # every map, even scenarios
+```
+
+Without a map name (or with an option first), `benchmark.sh` submits one job per map of `benchmarks/`, each named `mapf_benchmark_<map>`, plus a job `mapf_benchmark_aggregate` that waits until they have all ended (finished, failed or timed out) and merges their results. Extra arguments go to every `benchmark.py` run. `MAPS="map1 map2" ./benchmark.sh` runs only those maps.
+
+Each map job gets 1 node, 12 CPUs, 32 GB and 6 hours (the `#SBATCH` lines at the top of `benchmark.sh`), and runs `benchmark.py` with `--jobs 12 --timeout 30` and every solver except `cbs_ta`, `ecbs_ta` and `mcts_nonoverlap` (the `SOLVERS` list in the script; `--solvers` overrides it). A job that reaches its time limit keeps the results of the agent counts it finished, since they are written after each one. With the default agent counts (10, 20, 30, ... up to 1000 agents on the large maps) 6 hours may not reach the largest counts; pass e.g. `--agents 10 20 50 100 200` to bound a run.
+
+Its files, where `<id>` is each job's id:
+
+- `logs/mapf_benchmark_<map>_<id>.out` / `.err`: progress, one line per solver and agent count
+- `output/<map>_<id>_*`: each map's plot, results CSV and MAPFAST files (see [Benchmarking](#benchmarking-benchmarkpy))
+- `output/all_<id>_results.csv` and `output/all_<id>_{yaml,agent,map}_details.json`: every map's results and MAPFAST dataset merged, with the aggregate job's id
+
+To benchmark a single map, name it: `./benchmark.sh empty-8-8 --agents 10 20 30 --timeout 5` submits one job (no aggregate job) writing `output/empty-8-8_<id>_*`.
+
+To follow and manage the jobs:
+
+```sh
+squeue -u $USER                                   # pending and running jobs
+tail -f logs/mapf_benchmark_den312d_*.out         # one map's progress
+sacct -u $USER -S today --format=JobID,JobName%40,State,Elapsed   # how each job ended
+scancel -u $USER                                  # cancel all your jobs
+```
+
+If some map jobs failed, you can rerun them alone (`MAPS="den312d orz900d" ./benchmark.sh ...`) and merge everything by hand with `tools/aggregate.py`, which takes job ids or output prefixes:
+
+```sh
+python tools/aggregate.py 1234 1235 1236 --name all_maps    # writes output/all_maps_*
+```
+
+### 5. Copy the results back
+
+From your own machine:
+
+```sh
+rsync -av <user>@<cluster login host>:MAPF-Benchmarking/output/ output/
+```
 
 ## Adding a solver library
 
