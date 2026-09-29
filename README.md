@@ -272,6 +272,7 @@ The full benchmark (every map, every agent count, 25 scenario files each) is a h
 ### 1. Clone
 
 ```sh
+interact
 git clone --recurse-submodules git@github.com:mcapoor/MAPF-Benchmarking.git
 cd MAPF-Benchmarking
 ```
@@ -311,7 +312,7 @@ JOBS=4 ./build.sh
 
 It runs in three stages, and stops at the first if that fails:
 
-1. **Preflight, on the login node (seconds).** Every solver that `benchmark.sh` runs is built and finds its shared libraries; every map in `benchmarks/` has its `.map` and 25 random and 25 even scenario files, which load; `sbatch` is available and `output/`, `logs/` and `cache/` are writable. It prints `PASS`, or a `FAIL:` line per problem, and submits nothing if one fails.
+1. **Preflight, on the interact node (seconds).** Every solver that `benchmark.sh` runs is built and finds its shared libraries; every map in `benchmarks/` has its `.map` and 25 random and 25 even scenario files, which load; `sbatch` is available and `output/`, `logs/` and `cache/` are writable. It prints `PASS`, or a `FAIL:` line per problem, and submits nothing if one fails.
 2. **A small benchmark run.** `benchmark.sh` itself, with the same solvers, jobs and aggregate job as the full run, on 7 maps from 8×8 to the largest (`orz900d`): 2 and 4 agents on 2 scenario files each, a 20 second solver timeout and a 15 minute job limit. Change the maps with `MAPS="empty-8-8 den312d" ./test_cluster.sh`.
 3. **A check job, `mapf_test_check`,** that runs after the aggregate job. It fails if a map's results are incomplete (its job crashed or ran out of time), if a solver solved nothing (it does not work on the compute nodes, e.g. bcp2 without a Gurobi license there), if any solver missed a problem on `empty-8-8` or the optimal solvers disagree on its sums of costs, or if the MAPFAST files do not hold exactly the solved problems. Unsolved problems on the large maps are only warnings.
 
