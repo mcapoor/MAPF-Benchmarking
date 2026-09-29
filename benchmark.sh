@@ -34,8 +34,8 @@
 # mcts_nonoverlap, which solve different problems (see SOLVERS below); pass
 # --solvers to run others instead, as it overrides this list.
 #
-# Submits itself to Slurm (creating logs/ first, which Slurm does not do for
-# the -o/-e paths above). The progress log goes to logs/ and the results to
+# Submits itself to Slurm, also from inside an allocation (creating logs/
+# first, which Slurm does not do for the -o/-e paths above). The progress log goes to logs/ and the results to
 # output/, all named after the job id:
 #   logs/<job name>_<id>.out/.err                progress: one line per solver and batch
 #   output/<scenario>_<id>_results.csv           time, cost and makespan of every run, appended per batch
@@ -44,10 +44,15 @@
 # The results are written as the run goes, so a job cut off by the time limit
 # still leaves its partial results.
 
-if [ -z "$SLURM_JOB_ID" ]; then
+# SLURM_JOB_ID alone does not tell the job apart, as it is also set on an
+# interact node (inside salloc), where this is meant to be run from: the jobs
+# this submits inherit MAPF_BENCHMARK_JOB from it (sbatch exports the
+# environment) and nothing else sets it.
+if [ -z "$SLURM_JOB_ID" ] || [ -z "$MAPF_BENCHMARK_JOB" ]; then
     SCRIPT=$(readlink -f "$0")
     cd "$(dirname "$SCRIPT")" || exit 1
     mkdir -p logs
+    export MAPF_BENCHMARK_JOB=1
     if [ -n "$1" ] && [[ "$1" != -* ]]; then
         exec sbatch "$SCRIPT" "$@"
     fi
@@ -90,6 +95,7 @@ export PYTHONUNBUFFERED=1   # write progress lines to the log as they happen
 export MPLBACKEND=Agg       # no display on compute nodes
 
 module load boost yaml-cpp gurobi
+source .venv/bin/activate
 
 # the solvers of the standard MAPF problem (bcp2 needs a Gurobi license on the node)
 SOLVERS=(
