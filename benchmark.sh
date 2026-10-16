@@ -5,42 +5,37 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=32G
 #SBATCH -t 6:00:00
-#SBATCH -o logs/%x_%j.out
-#SBATCH -e logs/%x_%j.err
 #
 # Benchmark the MAPF solvers on every map of benchmarks/, or on one map (or
-# any scenario directory, see benchmark.py).
+# any scenario directory, see benchmark.py), as one experiment.
 #
 #   ./benchmark.sh [scenario] [extra benchmark.py arguments...]
-#   ./benchmark.sh                                   every map, one job each
-#   ./benchmark.sh --scen-type even                  every map, even scenarios
+#   EXPERIMENT=movingai_60s ./benchmark.sh               every map, one job each
+#   EXPERIMENT=movingai_60s ./benchmark.sh --scen-type even   add the even scenarios to it
 #   ./benchmark.sh empty-8-8 --agents 10 20 30 --timeout 5
-#   ./benchmark.sh room-32-32-4 --scen-type even
+#
+# Everything goes to experiments/<EXPERIMENT>/ (default <date>_<time>_<map or
+# all-maps>); give it a name that says what was measured:
+#   maps/<map>/                  one map's run (<map>-even for even scenarios):
+#                                results.csv (time, cost and makespan of every run), times.png and the MAPFAST
+#                                files {yaml,agent,map}_details.json, all rewritten after every agent count
+#   logs/<map>.out/.err          that map's progress, one line per solver and agent count (appended if it is rerun)
+#   results.csv, {yaml,agent,map}_details.json   every map merged by tools/aggregate.py (logs/merge.out)
+#   submitted.txt                what was submitted, when, with which job ids
 #
 # Without a scenario (no arguments, or the first one an option), it submits
 # one job per map directory of benchmarks/, each with the extra arguments and
-# named mapf_benchmark_<map>, plus a job mapf_benchmark_aggregate that starts
-# once they have all ended (finished, failed or timed out) and merges their
-# results with tools/aggregate.py into
-#   output/all_<id>_results.csv                  the results of every map
-#   output/all_<id>_{yaml,agent,map}_details.json   the MAPFAST dataset of every map
-# where <id> is the aggregate job's id. Set MAPS to a space-separated list of
-# maps to run only those, e.g. MAPS="empty-8-8 den312d" ./benchmark.sh.
-#
-# Run ./test_cluster.sh first: it checks the whole stack on a few small
-# problems before this spends the compute quota.
+# named mapf_benchmark_<map>, plus a job mapf_benchmark_merge that starts once
+# they have all ended (finished, failed or timed out) and merges every map of
+# the experiment (also maps added by earlier submissions). Set MAPS to a
+# space-separated list of maps to run only those, e.g. MAPS="empty-8-8
+# den312d" ./benchmark.sh, which also reruns failed maps; AGGREGATE=0 leaves
+# out the merge job, e.g. to merge once several submissions have ended.
 #
 # Runs every solver except the task assignment solvers (cbs_ta, ecbs_ta) and
 # mcts_nonoverlap, which solve different problems (see SOLVERS below); pass
 # --solvers to run others instead, as it overrides this list.
 #
-# Submits itself to Slurm, also from inside an allocation (creating logs/
-# first, which Slurm does not do for the -o/-e paths above). The progress log goes to logs/ and the results to
-# output/, all named after the job id:
-#   logs/<job name>_<id>.out/.err                progress: one line per solver and batch
-#   output/<scenario>_<id>_results.csv           time, cost and makespan of every run, appended per batch
-#   output/<scenario>_<id>_times.png             time / success / cost / makespan plot, rewritten per batch
-#   output/<scenario>_<id>_{yaml,agent,map}_details.json   MAPFAST dataset, rewritten per batch
 # The results are written as the run goes, so a job cut off by the time limit
 # still leaves its partial results.
 
@@ -51,12 +46,39 @@
 if [ -z "$SLURM_JOB_ID" ] || [ -z "$MAPF_BENCHMARK_JOB" ]; then
     SCRIPT=$(readlink -f "$0")
     cd "$(dirname "$SCRIPT")" || exit 1
-    mkdir -p logs
     export MAPF_BENCHMARK_JOB=1
+
+    # the run folder of a map: <map>, or <map>-even with --scen-type even (as benchmark.py names it)
+    run_name() {
+        local name=$(basename "$1") prev=""
+        shift
+        for arg in "$@"; do
+            [ "$prev" = --scen-type ] && [ "$arg" = even ] && name+="-even"
+            [ "$arg" = --scen-type=even ] && name+="-even"
+            prev=$arg
+        done
+        echo "$name"
+    }
+
     if [ -n "$1" ] && [[ "$1" != -* ]]; then
-        exec sbatch "$SCRIPT" "$@"
+        scope=$(basename "$1")
+    elif [ -n "$MAPS" ]; then
+        scope=maps
+    else
+        scope=all-maps
     fi
-    # no scenario given: one job per map (of $MAPS if set, e.g. by test_cluster.sh)
+    export MAPF_EXPERIMENT="${EXPERIMENT:-$(date +%Y-%m-%d_%H%M)_$scope}"
+    dir="experiments/$MAPF_EXPERIMENT"
+    mkdir -p "$dir/logs"
+    log_options() { echo -o "$dir/logs/$1.out" -e "$dir/logs/$1.err" --open-mode=append; }
+
+    if [ -n "$1" ] && [[ "$1" != -* ]]; then
+        id=$(sbatch --parsable $(log_options "$(run_name "$@")") "$SCRIPT" "$@") || exit 1
+        echo "$(date '+%F %T') $(run_name "$@"): job ${id%%;*}, arguments: $*" >> "$dir/submitted.txt"
+        echo "Submitted batch job ${id%%;*} ($1), results in $dir/"
+        exit
+    fi
+    # no scenario given: one job per map (of $MAPS if set)
     if [ -n "$MAPS" ]; then
         map_dirs=()
         for map in $MAPS; do map_dirs+=("benchmarks/$map/"); done
@@ -70,26 +92,28 @@ if [ -z "$SLURM_JOB_ID" ] || [ -z "$MAPF_BENCHMARK_JOB" ]; then
             continue
         fi
         map=$(basename "$map_dir")
-        id=$(sbatch --parsable -J "mapf_benchmark_$map" "$SCRIPT" "$map" "$@") || continue
+        name=$(run_name "$map" "$@")
+        id=$(sbatch --parsable -J "mapf_benchmark_$map" $(log_options "$name") "$SCRIPT" "$map" "$@") || continue
         id=${id%%;*}   # --parsable prints <id> or <id>;<cluster>
         echo "Submitted batch job $id ($map)"
+        echo "$(date '+%F %T') $name: job $id, arguments: $*" >> "$dir/submitted.txt"
         ids+=("$id")
     done
     [ ${#ids[@]} -gt 0 ] || exit 1
-    # then merge their results, whether they finished or not (afterany)
-    sbatch -J mapf_benchmark_aggregate --dependency="afterany:$(IFS=:; echo "${ids[*]}")" \
-        -N 1 -n 1 --cpus-per-task=1 --mem=16G -t 1:00:00 \
-        -o "logs/%x_%j.out" -e "logs/%x_%j.err" \
-        --wrap "MPLBACKEND=Agg python tools/aggregate.py ${ids[*]} --name all_\$SLURM_JOB_ID"
+    echo "Experiment $dir/"
+    [ "${AGGREGATE:-1}" = 0 ] && exit
+    # then merge every map of the experiment, whether its job finished or not (afterany)
+    id=$(sbatch --parsable -J mapf_benchmark_merge --dependency="afterany:$(IFS=:; echo "${ids[*]}")" \
+        -N 1 -n 1 --cpus-per-task=1 --mem=16G -t 1:00:00 $(log_options merge) \
+        --wrap "MPLBACKEND=Agg python tools/aggregate.py $dir") || exit 1
+    echo "Merge job ${id%%;*} writes the merged results to $dir/"
     exit
 fi
 
 cd "$SLURM_SUBMIT_DIR" || exit 1
-mkdir -p logs
 
 SCENARIO=$1
 shift
-NAME=$(basename "$SCENARIO")_${SLURM_JOB_ID}
 
 export PYTHONUNBUFFERED=1   # write progress lines to the log as they happen
 export MPLBACKEND=Agg       # no display on compute nodes
@@ -110,5 +134,5 @@ python benchmark.py "$SCENARIO" \
     --jobs 12 \
     --timeout 60 \
     --no-show \
-    --name "$NAME" \
+    --experiment "$MAPF_EXPERIMENT" \
     "$@"

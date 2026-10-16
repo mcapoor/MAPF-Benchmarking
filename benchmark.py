@@ -1,3 +1,23 @@
+"""Time MAPF solvers on the MovingAI scenarios of one map (a directory with one .map and its <map>-<random|even>-<k>.scen
+files, or the name of a map in benchmarks/). The problem with n agents of a scenario file is its first n agents, so
+every solver gets the same problem.
+
+    python benchmark.py empty-8-8 --timeout 5 --jobs 4
+    python benchmark.py room-32-32-4 --scen-type even --agents 10 20 50 --experiment room-test
+
+The results go to experiments/<experiment>/maps/<map>/ (see experiment_dir and the options), rewritten after every
+agent count so that an interrupted run keeps them: results.csv (solver, n_agents, instance, wall time, sum of costs,
+makespan and the cost the solver reported; empty if unsolved), times.png (time, fraction solved, and sum of costs and
+makespan on the instances every solver solved) and the MAPFAST dataset (see mapfast_records). benchmark.sh runs one
+map per Slurm job and tools/aggregate.py merges them.
+
+Comparing the numbers: the sum of costs and makespan are computed from each solver's paths the same way, but are only
+comparable between solvers of the same problem. ecbs (bounded-suboptimal) and mapf_prioritized_sipp (neither optimal
+nor complete) are not optimal; the task assignment solvers (cbs_ta, ecbs_ta) also choose the goals; reloc forbids
+following an agent into the cell it leaves; mcts_nonoverlap looks for vertex-disjoint paths, so it is only run when
+listed in --solvers. With --jobs above 1 the runs share the machine, so the times include some contention (more jobs
+than physical cores distorts them); converting problems to a library's format happens before the timing.
+"""
 import argparse
 import collections
 import concurrent.futures
@@ -8,37 +28,33 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 import matplotlib.pyplot as plt
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-# allow running as a script (python benchmark.py), not only as a module
 sys.path.insert(0, ROOT_DIR)
 
 from tools import reloc_wrappers, standard_benchmark_converter, utils
 from tools.solve_and_visualize import GRID_SOLVERS, MOVINGAI_SOLVERS, solve, solver_binary
 
-# the MovingAI benchmarks: one directory per map, with the map and its random
-# and even scenario files
+
 BENCHMARK_DIR = os.path.join(ROOT_DIR, "benchmarks")
-# the kinds of MovingAI scenario files, e.g. empty-8-8-random-3.scen
 SCEN_TYPES = ("random", "even")
-# the type and number of a MovingAI scenario file, e.g. random and 3 for
-# empty-8-8-random-3.scen
+
 SCEN_NAME = re.compile(r"-(\w+)-(\d+)\.scen$")
 
-# the plot, the raw results and the MAPFAST files of a run are written here
-OUTPUT_DIR = os.path.join(ROOT_DIR, "output")
+# every benchmark experiment gets a folder here: experiments/<experiment>/maps/<map>/ holds the results of one map
+# (see experiment_dir), and experiments/<experiment>/ the merged results and the Slurm logs (see benchmark.sh)
+EXPERIMENTS_DIR = os.path.join(ROOT_DIR, "experiments")
+# the files of a benchmark: the raw runs, their plot, and the MAPFAST dataset (one file per MAPFAST_DETAILS)
+RESULTS_FILE = "results.csv"
+PLOT_FILE = "times.png"
 
-# a solved run: the wall time in seconds, the sum of costs and makespan of the
-# solution (see utils.solution_metrics) and the cost the solver reported
-# itself (None if it reports none)
 Run = collections.namedtuple("Run", "seconds cost makespan solver_cost")
 
-# the json files MAPFAST (the algorithm selector) reads, see its README
 MAPFAST_DETAILS = ("yaml_details", "agent_details", "map_details")
 
-# every solver that runs on the MovingAI problems
 SOLVERS = [*GRID_SOLVERS, *MOVINGAI_SOLVERS]
 # mcts_nonoverlap looks for vertex-disjoint paths, so most instances of the
 # MAPF scenarios have no solution for it: it is only run when asked for
@@ -322,14 +338,21 @@ def add_mapfast_batch(details, map_file, n_agents, scens, times):
             details[name][utils.instance_name(scen, n_agents)] = record
 
 
-def write_mapfast(directory, prefix, details):
-    """Write each of the MAPFAST `details` to <directory>/<prefix>_<name>.json.
+def experiment_dir(experiment):
+    """The folder of an experiment: a path to it, or its name in EXPERIMENTS_DIR."""
+    if os.path.isabs(experiment) or os.sep in experiment.rstrip(os.sep):
+        return os.path.normpath(experiment)
+    return os.path.join(EXPERIMENTS_DIR, experiment)
+
+
+def write_mapfast(directory, details):
+    """Write each of the MAPFAST `details` to <directory>/<name>.json.
 
     A file is replaced in one step, so a run that is killed while writing still
     leaves the complete files of the previous batch."""
     os.makedirs(directory, exist_ok=True)
     for name, records in details.items():
-        path = os.path.join(directory, f"{prefix}_{name}.json")
+        path = os.path.join(directory, f"{name}.json")
         with open(path + ".tmp", "w") as details_file:
             json.dump(records, details_file)
         os.replace(path + ".tmp", path)
@@ -349,21 +372,27 @@ if __name__ == '__main__':
                         help='agent counts to run, each the first n agents of every scenario file '
                              '(default: 10, 20, 30, ... up to the agents of the smallest scenario file)')
     parser.add_argument('--max-instances', type=int, default=None, help='only use the first m scenario files of the map')
+    parser.add_argument('--experiment', default=None,
+                        help='experiment to add this map to: a name in experiments/ or a folder (default: '
+                             '<date>_<time>_<name>, a new one)')
     parser.add_argument('--name', default=None,
-                        help='prefix of the files written to output/ (default: the scenario directory name, plus -even for --scen-type even): '
-                             '<name>_times.png, <name>_results.csv and the MAPFAST dataset files <name>_yaml_details.json, '
-                             '<name>_agent_details.json and <name>_map_details.json, all updated after every batch')
-    parser.add_argument('--output', default=None, help='plot file (default: output/<name>_times.png)')
-    parser.add_argument('--results', default=None, help='CSV file of the raw times, started afresh by every run (default: output/<name>_results.csv)')
+                        help='folder of this run in the experiment, experiments/<experiment>/maps/<name>/ (default: the '
+                             'scenario directory name, plus -even for --scen-type even), which gets times.png, results.csv '
+                             'and the MAPFAST dataset files yaml_details.json, agent_details.json and map_details.json, '
+                             'all updated after every batch')
+    parser.add_argument('--output', default=None, help='plot file (default: <run folder>/times.png)')
+    parser.add_argument('--results', default=None, help='CSV file of the raw times, started afresh by every run (default: <run folder>/results.csv)')
     parser.add_argument('--no-show', action='store_true', help='do not open the plot window')
     args = parser.parse_args()
 
     scenario = os.path.normpath(scenario_dir(args.scenario))
     title = os.path.basename(scenario) + ("" if args.scen_type == "random" else f" ({args.scen_type} scenarios)")
     prefix = args.name or os.path.basename(scenario) + ("" if args.scen_type == "random" else f"-{args.scen_type}")
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    output = args.output or os.path.join(OUTPUT_DIR, prefix + "_times.png")
-    results = args.results or os.path.join(OUTPUT_DIR, prefix + "_results.csv")
+    experiment = experiment_dir(args.experiment or time.strftime("%Y-%m-%d_%H%M_") + prefix)
+    run_dir = os.path.join(experiment, "maps", prefix)
+    os.makedirs(run_dir, exist_ok=True)
+    output = args.output or os.path.join(run_dir, PLOT_FILE)
+    results = args.results or os.path.join(run_dir, RESULTS_FILE)
     if os.path.exists(results):
         os.remove(results)  # append_results adds to it batch by batch
     mapfast = {name: {} for name in MAPFAST_DETAILS}
@@ -378,7 +407,7 @@ if __name__ == '__main__':
         # still leaves all of them
         append_results(results, n_agents, scens, times)
         add_mapfast_batch(mapfast, map_file, n_agents, scens, times)
-        write_mapfast(OUTPUT_DIR, prefix, mapfast)
+        write_mapfast(run_dir, mapfast)
         plot(times, title, output, show=False)
 
     try:
@@ -387,6 +416,6 @@ if __name__ == '__main__':
     except ValueError as error:
         sys.exit(str(error))
     maps = sum(len(runs) for runs in next(iter(times.values())).values())
-    print(f"wrote {len(mapfast['yaml_details'])} of {maps} problems to the MAPFAST files in {OUTPUT_DIR} "
+    print(f"wrote {len(mapfast['yaml_details'])} of {maps} problems to the MAPFAST files in {run_dir} "
           "(the others were solved by no solver)")
     plot(times, title, output, show=not args.no_show)

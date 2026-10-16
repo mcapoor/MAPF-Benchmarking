@@ -1,4 +1,6 @@
 __pycache__/
+# benchmark results, Slurm logs and the old layout (see tools/temp_organize_results.py)
+experiments/
 logs/
 output/
 cache/
