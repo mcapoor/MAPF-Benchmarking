@@ -147,7 +147,8 @@ def plan(sets, other, renames={}):
         if file_set.stem not in names:
             name = base = renames.get(file_set.stem) or file_set.describe()
             k = 2
-            while name in used or os.path.exists(os.path.join(EXPERIMENTS_DIR, name)):
+            # a name given with --rename may exist already (a run that stopped part way): its files go into it
+            while name in used or (file_set.stem not in renames and os.path.exists(os.path.join(EXPERIMENTS_DIR, name))):
                 name, k = f"{base}_{k}", k + 1
             used.add(name)
             names[file_set.stem] = os.path.join(EXPERIMENTS_DIR, name)
@@ -161,7 +162,18 @@ def plan(sets, other, renames={}):
         for number, path in file_set.shards.items():
             moves[path] = os.path.join(folder(file_set), "shards", f"shard{number}.csv")
 
-    for merge in merges:
+    taken = collections.defaultdict(set)
+
+    def unique(directory, name):
+        """name, or <name>_earlier-<k> if the folder has it already (in this plan or on disk)"""
+        base, k = name, 1
+        while name in taken[directory] or os.path.exists(os.path.join(directory, name)):
+            name, k = f"{base}_earlier-{k}", k + 1
+        taken[directory].add(name)
+        return name
+
+    # the latest merge (and below, map run) of a group gets its name, earlier ones <name>_earlier-<k>
+    for merge in sorted(merges, key=lambda s: -(s.job or 0)):
         owner = top[merge.stem]
         if owner is merge:
             place(merge, folder(merge))
@@ -170,12 +182,10 @@ def plan(sets, other, renames={}):
         else:
             group = merge.describe().split("_", 1)[1] if len(merge.runs) else merge.stem
             types = sorted({t for _, t in merge.runs})
-            group = f"{'+'.join(types)}_{group}"
+            group = unique(os.path.join(folder(owner), "merges"), f"{'+'.join(types)}_{group}")
             place(merge, os.path.join(folder(owner), "merges", group))
             if merge.job:
                 job_places[merge.job] = (folder(owner), f"merge_{group}")
-    taken = collections.defaultdict(set)
-    # the latest run of a map gets its name, earlier (e.g. failed and resubmitted) runs <name>_earlier-<k>
     for run in sorted(map_runs, key=lambda s: -(s.job or 0)):
         owners = [m for m in merges if contains(m, run)]
         if owners:
@@ -184,11 +194,7 @@ def plan(sets, other, renames={}):
             experiment = folder(top[owner.stem])
         else:
             experiment = folder(run)
-        name = run.run_name()
-        k = 1
-        while name in taken[experiment]:
-            name, k = f"{run.run_name()}_earlier-{k}", k + 1
-        taken[experiment].add(name)
+        name = unique(os.path.join(experiment, "maps"), run.run_name())
         place(run, os.path.join(experiment, "maps", name))
         if run.job:
             job_places[run.job] = (experiment, name)
@@ -268,13 +274,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     sets, other = collect()
+    if not sets and not other and not (os.path.isdir(OLD_LOGS) and os.listdir(OLD_LOGS)):
+        # e.g. run a second time: everything is in experiments/ already
+        print("nothing to move: no output/ or logs/")
+        sys.exit(0)
     renames = dict(r.split("=", 1) for r in args.rename)
     unknown = [stem for stem in renames if stem not in sets]
     if unknown:
-        sys.exit(f"--rename: no files of {', '.join(unknown)} in output/")
+        sys.exit(f"--rename: no files of {', '.join(unknown)} in output/ (its prefixes: {', '.join(sorted(sets)[:10])})")
     moves, names = plan(sets, other, renames)
-    if not moves:
-        sys.exit("nothing to move: no output/ or logs/")
     by_experiment = collections.defaultdict(list)
     for old, new in moves.items():
         by_experiment[os.path.relpath(new.replace("  (appended)", ""), EXPERIMENTS_DIR).split(os.sep)[0]].append((old, new))
