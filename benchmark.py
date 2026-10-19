@@ -90,10 +90,18 @@ def scenario_files(scenario, scen_type="random"):
 
 
 @functools.cache
+def load_map(map_file):
+    """(width, height, obstacles) of a MovingAI map, read once per map so that
+    its scenario files share one obstacle set."""
+    return standard_benchmark_converter.load_map_file(map_file)
+
+
+@functools.cache
 def load_instance(map_file, scen_file):
     """(width, height, obstacles, [(start, goal) of every agent]) of a MovingAI
-    map and scenario file, with the agents in file order."""
-    width, height, obstacles = standard_benchmark_converter.load_map_file(map_file)
+    map and scenario file, with the agents in file order. The obstacles are
+    load_map's set, shared with the map's other scenario files: do not change it."""
+    width, height, obstacles = load_map(map_file)
     agents = standard_benchmark_converter.load_scenario_file(scen_file, obstacles, width, height)
     return width, height, obstacles, agents
 
