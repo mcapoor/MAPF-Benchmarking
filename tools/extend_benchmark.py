@@ -17,13 +17,21 @@ file.
         --name movingai_10-500-agents_300s
 
 `run` does one shard of the (scenario file, solver) groups and writes experiments/<name>/shards/shard<i>.csv as each
-group ends, so a job that is cut off keeps the groups it finished (and a resubmitted shard skips them). `merge` (with
-the same --timeout and --agents) writes experiments/<name>/results.csv, the original runs with the new ones in place,
-and the MAPFAST files experiments/<name>/{yaml,agent,map}_details.json, as aggregate.py would; it warns about groups
-no shard finished, whose runs keep their old results. MAPFAST's scripts/generate_benchmark.sh submits all of it on
-Slurm. Experiments are names in experiments/ or folders.
+group ends, so a job that is cut off keeps the groups it finished (and a resubmitted shard skips them). Each failed
+run also gets a "#failed" row with its reason (benchmark.FAILURES) and wall time. With --retry, `run` also redoes the
+finished groups whose failure was not a timeout or a solver giving up: a run killed (usually by the out-of-memory
+killer, when the runs of a job together use more than its memory) or crashed says nothing about the instance, nor do
+the larger counts skipped after it. Failures written before the reasons were recorded count as "unknown" and are
+retried too. The new rows go after the old ones in the shard, and later rows win.
+
+`merge` (with the same --timeout and --agents) writes experiments/<name>/results.csv, the original runs with the new
+ones in place, and the MAPFAST files experiments/<name>/{yaml,agent,map}_details.json, as aggregate.py would, and
+counts the failures by reason. It stops if a group was not finished by any shard (--allow-missing: they keep their old
+results). MAPFAST's scripts/generate_benchmark.sh submits all of it on Slurm. Experiments are names in experiments/
+or folders.
 """
 import argparse
+import collections
 import concurrent.futures
 import csv
 import glob
@@ -35,11 +43,13 @@ import threading
 # allow running as a script (python tools/extend_benchmark.py), not only as a module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from benchmark import BENCHMARK_DIR, MAPFAST_DETAILS, RESULTS_FILE, experiment_dir, load_instance, mapfast_records, time_solver, \
-    write_mapfast
+from benchmark import BENCHMARK_DIR, MAPFAST_DETAILS, RESULTS_FILE, experiment_dir, load_instance, mapfast_records, \
+    solver_outcome, write_mapfast
 from tools import reloc_wrappers, utils
 
 HEADER = ["solver", "n_agents", "map", "seconds", "cost", "makespan", "solver_cost"]
+# failures that say something about the instance (see benchmark.FAILURES); --retry redoes the others
+FINAL_FAILURES = ("timeout", "no solution")
 INSTANCE = re.compile(r"^((.+)-(?:random|even)-\d+)_agents(\d+)\.yaml$")
 
 
@@ -91,8 +101,10 @@ def run_group(scen, solver, map_file, counts, runs, timeout):
     """The new CSV rows of one (scenario file, solver) group: a run for each count that is new or was not solved,
     until one fails; the counts after that are written as failures without running them.
 
-    Returns (rows, runs done, runs skipped)"""
+    Returns (rows, runs done, runs skipped): the CSV rows of the runs, then a "#failed" row (instance, solver, reason,
+    wall seconds) for the failed run"""
     rows, done, skipped = [], 0, 0
+    failure = None
     failed = False
     for n_agents in counts:
         instance = utils.instance_name(scen, n_agents)
@@ -103,30 +115,71 @@ def run_group(scen, solver, map_file, counts, runs, timeout):
             rows.append([solver, n_agents, instance, "", "", "", ""])
             skipped += 1
             continue
-        run = time_solver(solver_input(scen, n_agents, solver, map_file), solver, timeout)
+        run, reason, seconds = solver_outcome(solver_input(scen, n_agents, solver, map_file), solver, timeout)
         done += 1
         if run is None:
             failed = True
+            failure = ["#failed", instance, solver, reason, f"{seconds:.3f}"]
             rows.append([solver, n_agents, instance, "", "", "", ""])
         else:
             rows.append([solver, n_agents, instance, f"{run.seconds:.6f}", run.cost, run.makespan,
                          "" if run.solver_cost is None else run.solver_cost])
-    return rows, done, skipped
+    return rows + ([failure] if failure else []), done, skipped
 
 
 def shard_path(name, shard):
     return os.path.join(experiment_dir(name), "shards", f"shard{shard}.csv")
 
 
+def read_shards(paths):
+    """(rows, finished groups, failure reasons) of shard files, read in order so that later rows win:
+    {(instance, solver): CSV row}, {(scenario file, solver)}, {(instance, solver): reason}"""
+    rows, finished, reasons = {}, set(), {}
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        with open(path, newline="") as shard_file:
+            for row in csv.reader(shard_file):
+                if not row:
+                    continue
+                if row[0] == "#done":
+                    finished.add(tuple(row[1].split("|", 1)))
+                elif row[0] == "#failed":
+                    reasons[(row[1], row[2])] = row[3]
+                else:
+                    rows[(row[2], row[0])] = row
+    return rows, finished, reasons
+
+
+def failure(scen, solver, counts, runs):
+    """(instance, solver) of the run that failed in a group (the smallest unsolved count: the larger ones were
+    skipped after it), or None if it has no failure"""
+    for n_agents in counts:
+        key = (utils.instance_name(scen, n_agents), solver)
+        if key in runs and runs[key][3] == "":
+            return key
+    return None
+
+
+def to_retry(groups, keys, runs, reasons):
+    """{group: reason} of the finished groups among `keys` whose failure is not one of FINAL_FAILURES"""
+    retry = {}
+    for scen, solver in keys:
+        failed = failure(scen, solver, groups[(scen, solver)][1], runs)
+        if failed and reasons.get(failed, "unknown") not in FINAL_FAILURES:
+            retry[(scen, solver)] = reasons.get(failed, "unknown")
+    return retry
+
+
 def run_shard(args, runs, groups):
     keys = list(groups)[args.shard::args.shards]
     path = shard_path(args.name, args.shard)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    finished = set()
-    if os.path.exists(path):
-        # a resubmitted shard skips the groups its earlier job finished
-        with open(path, newline="") as shard_file:
-            finished = {tuple(row[1].split("|", 1)) for row in csv.reader(shard_file) if row and row[0] == "#done"}
+    # a resubmitted shard skips the groups its earlier job finished, and with --retry starts the groups it redoes from
+    # the runs they already solved
+    rows, finished, reasons = read_shards([path])
+    runs = {**runs, **rows}
+    retry = to_retry(groups, [key for key in keys if key in finished], runs, reasons) if args.retry else {}
     lock = threading.Lock()
     totals = {"groups": 0, "done": 0, "skipped": 0}
 
@@ -146,29 +199,43 @@ def run_shard(args, runs, groups):
             print(f"{totals['groups']}/{len(todo)} groups | {os.path.basename(scen)} {solver}: {done} runs, "
                   f"{skipped} skipped after a failure", flush=True)
 
-    todo = [key for key in keys if key not in finished]
-    print(f"shard {args.shard}/{args.shards}: {len(keys)} groups, {len(keys) - len(todo)} finished before", flush=True)
+    todo = [key for key in keys if key not in finished or key in retry]
+    print(f"shard {args.shard}/{args.shards}: {len(keys)} groups, {len(keys) - len(todo) + len(retry)} finished before"
+          + (f", {len(retry)} of them to retry ({describe(collections.Counter(retry.values()))})" if args.retry else ""),
+          flush=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         for future in [pool.submit(work, key) for key in todo]:
             future.result()
     print(f"shard {args.shard} done: {totals['done']} runs, {totals['skipped']} skipped", flush=True)
 
 
+def describe(counter):
+    """e.g. "12 timeout, 3 killed" of a Counter"""
+    return ", ".join(f"{n} {reason}" for reason, n in counter.most_common()) or "none"
+
+
+def shard_paths(name):
+    return sorted(glob.glob(os.path.join(glob.escape(experiment_dir(name)), "shards", "shard*.csv")))
+
+
 def merge(args, runs, groups):
-    new, finished = {}, set()
-    for path in sorted(glob.glob(os.path.join(glob.escape(experiment_dir(args.name)), "shards", "shard*.csv"))):
-        with open(path, newline="") as shard_file:
-            for row in csv.reader(shard_file):
-                if row and row[0] == "#done":
-                    finished.add(tuple(row[1].split("|", 1)))
-                elif row:
-                    new[(row[2], row[0])] = row
+    new, finished, reasons = read_shards(shard_paths(args.name))
     missing = [key for key in groups if key not in finished]
     if missing:
-        print(f"warning: {len(missing)} of {len(groups)} groups were not finished by any shard (e.g. "
-              f"{os.path.basename(missing[0][0])} {missing[0][1]}); their runs keep the old results, so rerun "
-              f"those shards", file=sys.stderr)
+        print(f"{'warning' if args.allow_missing else 'error'}: {len(missing)} of {len(groups)} groups were not "
+              f"finished by any shard (e.g. {os.path.basename(missing[0][0])} {missing[0][1]}); rerun those shards"
+              + ("; their runs keep the old results" if args.allow_missing else " (or merge with --allow-missing)"),
+              file=sys.stderr)
+        if not args.allow_missing:
+            sys.exit(1)
     merged = {**runs, **new}
+    failures = collections.Counter(reasons.get(key, "unknown") for key in
+                                   filter(None, (failure(scen, solver, counts, merged)
+                                                 for (scen, solver), (_, counts) in groups.items())))
+    print(f"failed runs (one per group, the larger counts were skipped after them): {describe(failures)}")
+    if any(reason not in FINAL_FAILURES for reason in failures):
+        print("warning: some failures say nothing about the instance; run the shards again with --retry",
+              file=sys.stderr)
 
     out = experiment_dir(args.name)
     os.makedirs(out, exist_ok=True)
@@ -205,6 +272,10 @@ if __name__ == "__main__":
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", type=int, default=1)
     parser.add_argument("--jobs", type=int, default=1, help="runs at the same time (run; at most the number of cores)")
+    parser.add_argument("--retry", action="store_true",
+                        help="also redo the finished groups whose failure was not a timeout or a solver giving up (run, "
+                             "plan with --name)")
+    parser.add_argument("--allow-missing", action="store_true", help="merge even if some groups were not finished")
     args = parser.parse_args()
 
     runs = read_runs(os.path.join(experiment_dir(args.source), RESULTS_FILE))
@@ -218,6 +289,15 @@ if __name__ == "__main__":
               f"in {len(groups)} (scenario file, solver) groups")
         print(f"at most {(reruns + new) * args.timeout / 3600:.0f} CPU-hours without the skipping, "
               f"and at most {len(groups) * args.timeout / 3600:.0f} CPU-hours of timeouts with it (plus the solved runs)")
+        if args.retry and args.name:
+            rows, finished, reasons = read_shards(shard_paths(args.name))
+            known = {**runs, **rows}
+            retry = to_retry(groups, [key for key in groups if key in finished], known, reasons)
+            runs_left = sum(1 for key in retry for n in groups[key][1]
+                            if known.get((utils.instance_name(key[0], n), key[1]), [""] * 4)[3] == "")
+            print(f"{args.name}: {len(finished)} groups finished, {len(retry)} to retry "
+                  f"({describe(collections.Counter(retry.values()))}): at most {len(retry) * args.timeout / 3600:.0f} "
+                  f"CPU-hours of timeouts, {runs_left} runs to redo before the skipping")
     else:
         if not args.name:
             sys.exit("give --name")

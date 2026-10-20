@@ -146,7 +146,22 @@ def find_instances(scenario, solver, agents=None, max_instances=None, scen_type=
 
 def time_solver(instance, solver, timeout):
     """The Run of `solver` on `instance`, or None if it fails, crashes or
-    exceeds `timeout` seconds.
+    exceeds `timeout` seconds (see solver_outcome)."""
+    return solver_outcome(instance, solver, timeout)[0]
+
+
+# why a run is unsolved (solver_outcome): it ran out of time, gave up earlier without a solution, was killed by a
+# signal (on Slurm usually the out-of-memory killer, when the runs of a job together use more than its memory) or
+# exited with an error. Only "timeout" and "no solution" say something about the instance; the others are retried
+# by tools/extend_benchmark.py.
+FAILURES = ("timeout", "no solution", "killed", "crashed")
+# a solver that stops by itself at its time limit ends a little before `timeout` seconds of wall time
+TIMEOUT_MARGIN = 0.95
+
+
+def solver_outcome(instance, solver, timeout):
+    """(Run or None, reason, wall seconds) of `solver` on `instance`, where
+    reason is "solved" or one of FAILURES.
 
     The solvers that stop by themselves at the timeout measure it by their own
     clock (e.g. excluding reading the instance), so a solution that arrives
@@ -154,14 +169,19 @@ def time_solver(instance, solver, timeout):
     if solver.endswith("_ta"):
         # already converted by benchmark(), so this only looks up the cached file
         instance = utils.ensure_potential_goals(instance)
+    start = time.perf_counter()
     try:
         result, seconds = solve(instance, solver, timeout=timeout, quiet=True, report=False)
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        return None
-    if result is None or seconds > timeout:
-        return None
+    except subprocess.TimeoutExpired:
+        return None, "timeout", time.perf_counter() - start
+    except subprocess.CalledProcessError as error:
+        return None, "killed" if error.returncode < 0 else "crashed", time.perf_counter() - start
+    if seconds > timeout or (result is None and seconds >= TIMEOUT_MARGIN * timeout):
+        return None, "timeout", seconds
+    if result is None:
+        return None, "no solution", seconds
     cost, makespan = utils.solution_metrics(result["schedule"])
-    return Run(seconds, cost, makespan, (result.get("statistics") or {}).get("cost"))
+    return Run(seconds, cost, makespan, (result.get("statistics") or {}).get("cost")), "solved", seconds
 
 
 def benchmark(scenario, solvers, timeout=10, agents=None, max_instances=None, jobs=1, on_batch=None,
