@@ -7,9 +7,8 @@ every solver gets the same problem.
 
 The results go to experiments/<experiment>/maps/<map>/ (see experiment_dir and the options), rewritten after every
 agent count so that an interrupted run keeps them: results.csv (solver, n_agents, instance, wall time, sum of costs,
-makespan and the cost the solver reported; empty if unsolved), times.png (time, fraction solved, and sum of costs and
-makespan on the instances every solver solved) and the MAPFAST dataset (see mapfast_records). benchmark.sh runs one
-map per Slurm job and tools/aggregate.py merges them.
+makespan and the cost the solver reported; empty if unsolved) and times.png (time, fraction solved, and sum of costs
+and makespan on the instances every solver solved). tools/experiment.py benchmarks every map (benchmark.sh on Slurm).
 
 Comparing the numbers: the sum of costs and makespan are computed from each solver's paths the same way, but are only
 comparable between solvers of the same problem. ecbs (bounded-suboptimal) and mapf_prioritized_sipp (neither optimal
@@ -23,7 +22,6 @@ import collections
 import concurrent.futures
 import csv
 import functools
-import json
 import os
 import re
 import subprocess
@@ -44,16 +42,14 @@ SCEN_TYPES = ("random", "even")
 
 SCEN_NAME = re.compile(r"-(\w+)-(\d+)\.scen$")
 
-# every benchmark experiment gets a folder here: experiments/<experiment>/maps/<map>/ holds the results of one map
-# (see experiment_dir), and experiments/<experiment>/ the merged results and the Slurm logs (see benchmark.sh)
+# every benchmark experiment gets a folder here (see experiment_dir): experiments/<experiment>/maps/<map>/ holds a
+# benchmark.py run of one map, experiments/<experiment>/ the results of tools/experiment.py and its Slurm logs
 EXPERIMENTS_DIR = os.path.join(ROOT_DIR, "experiments")
-# the files of a benchmark: the raw runs, their plot, and the MAPFAST dataset (one file per MAPFAST_DETAILS)
+# the files of a benchmark: the raw runs and their plot
 RESULTS_FILE = "results.csv"
 PLOT_FILE = "times.png"
 
 Run = collections.namedtuple("Run", "seconds cost makespan solver_cost")
-
-MAPFAST_DETAILS = ("yaml_details", "agent_details", "map_details")
 
 SOLVERS = [*GRID_SOLVERS, *MOVINGAI_SOLVERS]
 # mcts_nonoverlap looks for vertex-disjoint paths, so most instances of the
@@ -153,7 +149,7 @@ def time_solver(instance, solver, timeout):
 # why a run is unsolved (solver_outcome): it ran out of time, gave up earlier without a solution, was killed by a
 # signal (on Slurm usually the out-of-memory killer, when the runs of a job together use more than its memory) or
 # exited with an error. Only "timeout" and "no solution" say something about the instance; the others are retried
-# by tools/extend_benchmark.py.
+# by tools/experiment.py.
 FAILURES = ("timeout", "no solution", "killed", "crashed")
 # a solver that stops by itself at its time limit ends a little before `timeout` seconds of wall time
 TIMEOUT_MARGIN = 0.95
@@ -329,61 +325,11 @@ def append_results(path, n_agents, scens, times):
                                     "" if run.solver_cost is None else run.solver_cost])])
 
 
-def mapfast_records(map_file, scen_file, n_agents, seconds):
-    """The MAPFAST records of the problem of the first `n_agents` agents of
-    `scen_file`, given the `seconds` (or None for a run that was not solved)
-    that each solver took on it.
-
-    Returns {name: record} for the names in MAPFAST_DETAILS, or None if no
-    solver solved the problem: MAPFAST labels a problem with its fastest
-    solver, so it has nothing to learn from one that nobody solved.
-    """
-    solved = {solver: t for solver, t in seconds.items() if t is not None}
-    if not solved:
-        return None
-    width, height, obstacles, agents = load_instance(map_file, scen_file)
-    agents = agents[:n_agents]
-    return {
-        "yaml_details": {"SOLVER": min(solved, key=solved.get),
-                         **{solver: -1 if t is None else round(t, 6) for solver, t in seconds.items()}},
-        "agent_details": {"starts": [list(start) for start, _ in agents],
-                          "goals": [list(goal) for _, goal in agents]},
-        "map_details": {"no_agents": n_agents,
-                        "mp_dim": [width, height],
-                        "no_obs": len(obstacles)},
-    }
-
-
-def add_mapfast_batch(details, map_file, n_agents, scens, times):
-    """Add the problems of one batch that some solver solved to `details`, a
-    {name: {instance name: record}} dict with an entry for each of
-    MAPFAST_DETAILS."""
-    for i, scen in enumerate(scens):
-        records = mapfast_records(map_file, scen, n_agents,
-                                  {solver: None if batches[n_agents][i] is None else batches[n_agents][i].seconds
-                                   for solver, batches in times.items()})
-        for name, record in (records or {}).items():
-            details[name][utils.instance_name(scen, n_agents)] = record
-
-
 def experiment_dir(experiment):
     """The folder of an experiment: a path to it, or its name in EXPERIMENTS_DIR."""
     if os.path.isabs(experiment) or os.sep in experiment.rstrip(os.sep):
         return os.path.normpath(experiment)
     return os.path.join(EXPERIMENTS_DIR, experiment)
-
-
-def write_mapfast(directory, details):
-    """Write each of the MAPFAST `details` to <directory>/<name>.json.
-
-    A file is replaced in one step, so a run that is killed while writing still
-    leaves the complete files of the previous batch."""
-    os.makedirs(directory, exist_ok=True)
-    for name, records in details.items():
-        path = os.path.join(directory, f"{name}.json")
-        with open(path + ".tmp", "w") as details_file:
-            json.dump(records, details_file)
-        os.replace(path + ".tmp", path)
 
 
 if __name__ == '__main__':
@@ -405,9 +351,8 @@ if __name__ == '__main__':
                              '<date>_<time>_<name>, a new one)')
     parser.add_argument('--name', default=None,
                         help='folder of this run in the experiment, experiments/<experiment>/maps/<name>/ (default: the '
-                             'scenario directory name, plus -even for --scen-type even), which gets times.png, results.csv '
-                             'and the MAPFAST dataset files yaml_details.json, agent_details.json and map_details.json, '
-                             'all updated after every batch')
+                             'scenario directory name, plus -even for --scen-type even), which gets times.png and '
+                             'results.csv, both updated after every batch')
     parser.add_argument('--output', default=None, help='plot file (default: <run folder>/times.png)')
     parser.add_argument('--results', default=None, help='CSV file of the raw times, started afresh by every run (default: <run folder>/results.csv)')
     parser.add_argument('--no-show', action='store_true', help='do not open the plot window')
@@ -423,27 +368,16 @@ if __name__ == '__main__':
     results = args.results or os.path.join(run_dir, RESULTS_FILE)
     if os.path.exists(results):
         os.remove(results)  # append_results adds to it batch by batch
-    mapfast = {name: {} for name in MAPFAST_DETAILS}
-    try:
-        map_file = scenario_files(scenario, args.scen_type)[0]
-    except (ValueError, FileNotFoundError) as error:
-        sys.exit(str(error))
 
     def on_batch(n_agents, scens, times):
-        # keep the plot, the raw results and the MAPFAST files up to date, so
-        # that a run that is killed part way (e.g. by a cluster time limit)
-        # still leaves all of them
+        # keep the plot and the raw results up to date, so that a run that is
+        # killed part way (e.g. by a cluster time limit) still leaves both
         append_results(results, n_agents, scens, times)
-        add_mapfast_batch(mapfast, map_file, n_agents, scens, times)
-        write_mapfast(run_dir, mapfast)
         plot(times, title, output, show=False)
 
     try:
         times = benchmark(scenario, args.solvers, args.timeout, args.agents, args.max_instances, args.jobs, on_batch,
                           args.scen_type)
-    except ValueError as error:
+    except (ValueError, FileNotFoundError) as error:
         sys.exit(str(error))
-    maps = sum(len(runs) for runs in next(iter(times.values())).values())
-    print(f"wrote {len(mapfast['yaml_details'])} of {maps} problems to the MAPFAST files in {run_dir} "
-          "(the others were solved by no solver)")
     plot(times, title, output, show=not args.no_show)

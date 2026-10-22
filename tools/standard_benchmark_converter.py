@@ -10,6 +10,7 @@ the other way, for the solvers that read MovingAI files.
 """
 import os
 import argparse
+import threading
 
 
 def setup_args():
@@ -128,8 +129,10 @@ def convert(scen_file, map_file, n_agents, output_file):
     if n_agents > len(instances):
         raise ValueError(f"{scen_file} has {len(instances)} agents, fewer than {n_agents}")
     os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-    dump_yaml(instances[:n_agents], map_width, map_height, occupancy_list, output_file + ".tmp")
-    os.replace(output_file + ".tmp", output_file)
+    # one temporary file per thread: several runs may convert the same problem at once
+    tmp = f"{output_file}.{os.getpid()}-{threading.get_ident()}.tmp"
+    dump_yaml(instances[:n_agents], map_width, map_height, occupancy_list, tmp)
+    os.replace(tmp, output_file)
     return output_file
 
 

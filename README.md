@@ -24,9 +24,10 @@ The problems are the [MovingAI MAPF benchmarks](https://movingai.com/benchmarks/
 | --- | --- |
 | `libs/` | The solver libraries (submodules) |
 | `benchmarks/` | The MovingAI maps and scenario files, one folder per map |
-| `tools/` | One wrapper module per library (`*_wrappers.py`), solving and drawing one problem (`solve_and_visualize.py`, `compare_solutions.py`), merging and extending benchmarks (`aggregate.py`, `extend_benchmark.py`), moving results of the old layout (`temp_organize_results.py`) |
-| `benchmark.py`, `benchmark.sh` | Time every solver on one map; run it on every map as Slurm jobs |
-| `experiments/` | One folder per benchmark experiment: each map's results, the merged results and the Slurm logs (not tracked) |
+| `tools/` | One wrapper module per library (`*_wrappers.py`), solving and drawing one problem (`solve_and_visualize.py`, `compare_solutions.py`), benchmarking every map (`experiment.py`) |
+| `benchmark.py` | Time every solver on one map |
+| `benchmark.sh` | Run `tools/experiment.py` on Slurm |
+| `experiments/` | One folder per experiment: results, the MAPFAST dataset and the Slurm logs (not tracked) |
 | `cache/` | Problems converted to a library's own format (not tracked) |
 
 ## Usage
@@ -50,8 +51,7 @@ The problems are the [MovingAI MAPF benchmarks](https://movingai.com/benchmarks/
 
    ```sh
    python benchmark.py empty-8-8 --timeout 5 --jobs 4
-   EXPERIMENT=movingai_60s ./benchmark.sh --timeout 60                     # random scenarios, one job per map
-   EXPERIMENT=movingai_60s ./benchmark.sh --scen-type even --timeout 60    # add the even scenarios
+   EXPERIMENT=movingai_10-200-agents_300s ./benchmark.sh --timeout 300 --agents 10 20 50 100 200
    ```
 
-   `MAPS="den312d orz900d"` limits it to some maps (e.g. to rerun failed ones). Results of the old `output/` and `logs/` layout move into `experiments/` with `python tools/temp_organize_results.py` (it prints the plan; `--apply` moves the files).
+   Per scenario file and solver, the agent counts after the first failure are skipped. `--maps` limits it to some maps, `--reuse <experiment>` keeps an earlier experiment's solved runs, and `--retry` redoes runs that were killed or crashed (see `tools/experiment.py`).
