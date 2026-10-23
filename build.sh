@@ -3,7 +3,7 @@
 # Build the solver libraries in libs/, each into its own build/ directory.
 #
 #   ./build.sh                       build every library
-#   ./build.sh cbsh2 bcp2            build only these (libmrp, mcts, cbsh2, bcp2, reloc)
+#   ./build.sh cbsh2 bcp2            build only these (libmrp, mcts, cbsh2, bcp1, bcp2, lazycbs, reloc)
 #   ./build.sh --clean [library...]  delete the build/ directories first
 #
 # A submodule that has not been cloned yet is initialized first. Submodules
@@ -15,11 +15,15 @@
 #   mcts    CMake, Boost, yaml-cpp
 #   cbsh2   CMake, Boost
 #   reloc   make, a C++11 compiler
+#   lazycbs CMake, Boost, yaml-cpp (Google's sparsehash is downloaded)
+#   bcp1    CMake 3.21+, a C++17 compiler, Gurobi (Boost is downloaded by its
+#           CMake, and the SCIP Optimization Suite 9.2.0 by this script)
 #   bcp2    CMake 3.21+, a C++23 compiler, Gurobi (Boost is downloaded by its
-#           CMake). Gurobi is found through $GUROBI_DIR, $GUROBI_HOME or the
-#           gurobi_cl on the PATH; set GUROBI_DIR to the directory holding
-#           include/ and lib/ if it is somewhere else. GCC 16 cannot compile
-#           it, so Clang is used instead if it is installed.
+#           CMake). GCC 16 cannot compile it, so Clang is used instead if it
+#           is installed.
+# Gurobi is found through $GUROBI_DIR, $GUROBI_HOME or the gurobi_cl on the
+# PATH; set GUROBI_DIR to the directory holding include/ and lib/ if it is
+# somewhere else.
 # Set CC/CXX to choose the compiler and JOBS the number of parallel jobs
 # (default: all cores; lower it if the bcp2 build runs out of memory).
 # On the Oscar cluster, `module load boost yaml-cpp gurobi` first. The solvers
@@ -31,14 +35,16 @@
 ROOT_DIR=$(dirname "$(readlink -f "$0")")
 LIBS_DIR="$ROOT_DIR/libs"
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 4)}
-ALL_LIBS=(libmrp mcts cbsh2 bcp2 reloc)
+ALL_LIBS=(libmrp mcts cbsh2 bcp1 bcp2 lazycbs reloc)
 
 # directory of each library in libs/ (all submodules except mcts_nonoverlap)
 declare -A DIRS=(
     [libmrp]=libMultiRobotPlanning
     [mcts]=mcts_nonoverlap
     [cbsh2]=CBSH2-RTC-CHBP
+    [bcp1]=bcp1-mapf
     [bcp2]=bcp2-mapf
+    [lazycbs]=lazycbs
     [reloc]=reLOC
 )
 
@@ -47,7 +53,7 @@ libs=()
 for arg in "$@"; do
     case "$arg" in
         --clean) clean=1 ;;
-        -h|--help) sed -n '2,29s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,33s/^# \{0,1\}//p' "$0"; exit 0 ;;
         *)
             if [ -z "${DIRS[$arg]}" ]; then
                 echo "unknown library '$arg' (expected one of: ${ALL_LIBS[*]})" >&2
@@ -119,15 +125,42 @@ prefetch_bcp2_deps() {
     done
 }
 
-build_bcp2() {
-    local dir="$LIBS_DIR/${DIRS[bcp2]}"
-    local gurobi deps
+# The Gurobi installation for bcp1 and bcp2, or an error
+require_gurobi() {
+    local gurobi
     gurobi=$(gurobi_dir)
     if [ -z "$gurobi" ] || [ ! -f "$gurobi/include/gurobi_c.h" ]; then
         echo "Gurobi not found: set GUROBI_DIR to the directory with include/gurobi_c.h" >&2
         return 1
     fi
-    echo "using Gurobi in $gurobi"
+    echo "using Gurobi in $gurobi" >&2
+    echo "$gurobi"
+}
+
+# bcp1-mapf builds SCIP from the SCIP Optimization Suite extracted into its own
+# directory (untracked there). Its CMake (and SCIP's) look for the Gurobi
+# library under names that stop at version 12, so it is passed in directly.
+build_bcp1() {
+    local dir="$LIBS_DIR/${DIRS[bcp1]}"
+    local gurobi library
+    gurobi=$(require_gurobi) || return 1
+    if [ ! -d "$dir/scipoptsuite-9.2.0" ]; then
+        curl -fsSL https://github.com/scipopt/scip/releases/download/v920/scipoptsuite-9.2.0.tgz |
+            tar xz -C "$dir" || { echo "could not download SCIP" >&2; return 1; }
+    fi
+    # SCIP writes its source directory unquoted into a CMake script, which breaks on a path with spaces
+    sed -i 's|EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/.git|EXISTS \\"${CMAKE_CURRENT_SOURCE_DIR}/.git\\"|; s|WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}$|WORKING_DIRECTORY \\"${CMAKE_CURRENT_SOURCE_DIR}\\"|' \
+        "$dir/scipoptsuite-9.2.0/scip/CMakeLists.txt"
+    library=$(ls "$gurobi"/lib/libgurobi*.so | grep -E '/libgurobi[0-9]+\.so$' | sort -V | tail -1)
+    cmake -S "$dir" -B "$dir/build" -DCMAKE_BUILD_TYPE=Release \
+          -DGUROBI_DIR="$gurobi" -DGUROBI_LIBRARY="$library" &&
+    cmake --build "$dir/build" --target bcp-mapf -j "$JOBS"
+}
+
+build_bcp2() {
+    local dir="$LIBS_DIR/${DIRS[bcp2]}"
+    local gurobi deps
+    gurobi=$(require_gurobi) || return 1
     local deps_args  # one argument per line (paths may contain spaces)
     deps_args=$(prefetch_bcp2_deps "$dir") || { echo "could not download the dependencies of bcp2-mapf" >&2; return 1; }
     deps=()
@@ -144,6 +177,21 @@ build_bcp2() {
     cmake -S "$dir" -B "$dir/build" -DCMAKE_BUILD_TYPE=Release "${compiler[@]}" \
           -DGUROBI_DIR="$gurobi" "${deps[@]}" &&
     cmake --build "$dir/build" --target bcp2-mapf -j "$JOBS"
+}
+
+# Lazy CBS includes the header-only sparsehash, which is cloned into build/.
+# Its Geas library uses uint32_t without including <cstdint>, which newer
+# standard libraries no longer include indirectly.
+build_lazycbs() {
+    local dir="$LIBS_DIR/${DIRS[lazycbs]}"
+    local sparsehash="$dir/build/_deps/sparsehash-c11"
+    if [ ! -d "$sparsehash" ]; then
+        git clone --quiet --depth 1 https://github.com/sparsehash/sparsehash-c11.git "$sparsehash" || return 1
+    fi
+    CXXFLAGS="-include cstdint $CXXFLAGS" \
+        cmake -S "$dir" -B "$dir/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 &&
+    CPLUS_INCLUDE_PATH="$sparsehash${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}" \
+        cmake --build "$dir/build" --target lazycbs_mapf -j "$JOBS"
 }
 
 build_reloc() {

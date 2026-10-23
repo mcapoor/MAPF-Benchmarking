@@ -8,6 +8,8 @@ Runs Multi-Agent Path Finding (MAPF) solvers from several libraries on the same 
 | --- | --- | --- |
 | `cbs`, `ecbs`, `cbs_ta`, `ecbs_ta`, `mapf_prioritized_sipp`, `cbs_roadmap` | [libMultiRobotPlanning](https://github.com/whoenig/libMultiRobotPlanning) (W. Hönig), [fork](https://github.com/mcapoor/libMultiRobotPlanning) | MIT |
 | `cbsh2_rtc`, `cbsh2_rtc_ch`, `cbsh2_rtc_bp`, `cbsh2_rtc_chbp` | [CBSH2-RTC-CHBP](https://github.com/bshen95/CBSH2-RTC-CHBP) (B. Shen et al.), [fork](https://github.com/mcapoor/CBSH2-RTC-CHBP) | GPL-3.0, run as a separate program |
+| `lazycbs` | [Lazy CBS](https://github.com/gkgange/lazycbs) (G. Gange, D. Harabor, P. J. Stuckey), via a [mirror](https://github.com/vikikkdi/lazy-cbs-mirror) that bundles its ECBS dependency and the [Geas](https://github.com/gkgange/geas) solver and reads the libMultiRobotPlanning format, [fork](https://github.com/mcapoor/lazycbs) | no license stated |
+| `bcp1` | [BCP-MAPF](https://github.com/ed-lam/bcp-mapf) (E. Lam, P. Le Bodic, D. Harabor, P. J. Stuckey; built with [SCIP](https://www.scipopt.org/) 9.2.0 and Gurobi), [fork](https://github.com/mcapoor/bcp1) | GPL-3.0 (SCIP: Apache-2.0) |
 | `bcp2` | [BCP2-MAPF](https://github.com/ed-lam/bcp2-mapf) (E. Lam; needs [Gurobi](https://www.gurobi.com/)), [fork](https://github.com/mcapoor/bcp2-mapf) | PolyForm Noncommercial |
 | `reloc` | [reLOC](https://github.com/surynek/reLOC) (P. Surynek), [fork](https://github.com/mcapoor/reLOC) cut down to its SAT-based solver | © Pavel Surynek 2011–2018; no license stated |
 | `mcts_nonoverlap` | `libs/mcts_nonoverlap/` | its `timer.hpp` from libMultiRobotPlanning (MIT) |
@@ -32,7 +34,7 @@ The problems are the [MovingAI MAPF benchmarks](https://movingai.com/benchmarks/
 
 ## Usage
 
-1. **Build** (CMake, Boost, yaml-cpp, a C++23 compiler and Gurobi; on Oscar `module load python boost yaml-cpp gurobi`):
+1. **Build** (CMake, Boost, yaml-cpp, a C++23 compiler and Gurobi; bcp1 downloads SCIP; on Oscar `module load python boost yaml-cpp gurobi`):
 
    ```sh
    git clone --recurse-submodules git@github.com:mcapoor/MAPF-Benchmarking.git && cd MAPF-Benchmarking
@@ -54,4 +56,4 @@ The problems are the [MovingAI MAPF benchmarks](https://movingai.com/benchmarks/
    EXPERIMENT=movingai_10-200-agents_300s ./benchmark.sh --timeout 300 --agents 10 20 50 100 200
    ```
 
-   Per scenario file and solver, the agent counts after the first failure are skipped. `--maps` limits it to some maps, `--reuse <experiment>` keeps an earlier experiment's solved runs, and `--retry` redoes runs that were killed or crashed (see `tools/experiment.py`).
+   Per scenario file and solver, the agent counts after the first failure are skipped. `--maps` limits it to some maps, `--reuse <experiment>` keeps an earlier experiment's solved runs (with `--solvers`, adds those solvers to it), and `--retry` redoes runs that were killed or crashed (see `tools/experiment.py`).

@@ -9,8 +9,12 @@ same file only make it harder), so a solver that cannot keep up costs one time l
 
 --maps limits it to some maps (default: all, or none with --reuse). --reuse EXPERIMENT starts from an earlier
 experiment's results.csv: its solved runs are kept (a run solved within its limit takes the same time with a longer
-one), its unsolved runs are rerun, and its scenario files and agent counts join the plan. benchmark.sh submits all of
-it on Slurm.
+one), its unsolved runs are rerun, and its scenario files and agent counts join the plan. With --solvers, only those
+solvers run and the reused runs of the others are kept as they are, which adds solvers to an earlier experiment:
+
+    python tools/experiment.py run NAME2 --timeout 300 --reuse NAME --solvers bcp1 lazycbs ...
+
+benchmark.sh submits all of it on Slurm.
 
 `run` does every shards-th group, starting at shard, and appends to experiments/<name>/shards/shard<i>.csv as each group
 ends: its runs, a "#failed" row (instance, solver, reason, wall seconds) for its failure, and a "#done" row, so that a
@@ -41,9 +45,9 @@ from tools import reloc_wrappers, utils
 
 HEADER = ["solver", "n_agents", "map", "seconds", "cost", "makespan", "solver_cost"]
 INSTANCE = re.compile(r"^((.+)-(?:random|even)-\d+)_agents(\d+)\.yaml$")
-# the solvers of the standard MAPF problem (bcp2 needs a Gurobi license on the node)
+# the solvers of the standard MAPF problem (bcp1 and bcp2 need a Gurobi license on the node)
 SOLVERS = ["cbs", "ecbs", "mapf_prioritized_sipp", "cbsh2_rtc", "cbsh2_rtc_ch", "cbsh2_rtc_bp", "cbsh2_rtc_chbp",
-           "reloc", "bcp2"]
+           "lazycbs", "reloc", "bcp1", "bcp2"]
 # failures that say something about the instance (see benchmark.FAILURES); --retry redoes the others
 FINAL_FAILURES = ("timeout", "no solution")
 MAPFAST_DETAILS = ("yaml_details", "agent_details", "map_details")
@@ -68,21 +72,22 @@ def scenario_file(instance):
 
 def plan(reused, agents, solvers, maps):
     """The work, as {(scenario file, solver): (map file, [agent count, ...])}: the counts of `agents` that the
-    scenario file has, and those of its reused runs, in increasing order; `run_group` decides which of them to run."""
+    scenario file has, and those of its reused runs (of any solver), in increasing order; `run_group` decides which of
+    them to run."""
     scens, counts = {}, collections.defaultdict(set)
     for name in maps:
         for scen_type in SCEN_TYPES:
             map_file, files = scenario_files(os.path.join(BENCHMARK_DIR, name), scen_type)
             scens.update(dict.fromkeys(files, map_file))
-    for instance, solver in reused:
+    for instance, _ in reused:
         map_file, scen, n_agents = scenario_file(instance)
         scens[scen] = map_file
-        counts[scen, solver].add(n_agents)
+        counts[scen].add(n_agents)
     groups = {}
     for scen, map_file in scens.items():
         available = len(load_instance(map_file, scen)[3])
         for solver in solvers:
-            groups[scen, solver] = (map_file, sorted(counts[scen, solver] | {n for n in agents if n <= available}))
+            groups[scen, solver] = (map_file, sorted(counts[scen] | {n for n in agents if n <= available}))
     return dict(sorted(groups.items()))
 
 
@@ -266,7 +271,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     runs = read_runs(os.path.join(experiment_dir(args.reuse), RESULTS_FILE)) if args.reuse else {}
-    runs = {key: row for key, row in runs.items() if key[1] in args.solvers}
     maps = args.maps if args.maps is not None else [] if args.reuse else sorted(
         name for name in os.listdir(BENCHMARK_DIR) if glob.glob(os.path.join(BENCHMARK_DIR, name, "*.map")))
     groups = plan(runs, args.agents, args.solvers, maps)

@@ -28,7 +28,7 @@ LIBMRP_SOLVERS = {
 }
 # the solvers that read libMultiRobotPlanning's YAML problem format (the
 # others read the MovingAI files themselves)
-YAML_SOLVERS = LIBMRP_SOLVERS | {"mcts_nonoverlap"}
+YAML_SOLVERS = LIBMRP_SOLVERS | {"mcts_nonoverlap", "lazycbs"}
 # libMultiRobotPlanning versions (YAML) of MovingAI problems, and MovingAI
 # versions of YAML problems, converted once and reused
 LIBMRP_CACHE_DIR = os.path.join(ROOT_DIR, "cache", "libMultiRobotPlanning")

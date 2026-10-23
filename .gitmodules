@@ -13,3 +13,9 @@
 [submodule "benchmarks"]
 	path = benchmarks
 	url = git@github.com:mcapoor/MovingAI-MAPF-Benchmarks.git
+[submodule "libs/bcp1-mapf"]
+	path = libs/bcp1-mapf
+	url = git@github.com:mcapoor/bcp1.git
+[submodule "libs/lazycbs"]
+	path = libs/lazycbs
+	url = git@github.com:mcapoor/lazycbs.git

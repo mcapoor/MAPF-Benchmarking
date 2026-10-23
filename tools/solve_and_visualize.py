@@ -9,7 +9,8 @@ import yaml
 # allow running as a script (python tools/solve_and_visualize.py), not only as a module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools import bcp2_wrappers, chbp_wrappers, libMRP_wrappers, mcts_wrappers, reloc_wrappers, utils
+from tools import bcp1_wrappers, bcp2_wrappers, chbp_wrappers, lazycbs_wrappers, libMRP_wrappers, mcts_wrappers, \
+    reloc_wrappers, utils
 from tools.visualize import Animation
 
 RoadmapAnimation = utils.load_module(utils.VISUALIZE_ROADMAP, "libmrp_visualize_roadmap").Animation
@@ -22,6 +23,7 @@ GRID_SOLVERS = {
     "ecbs_ta": lambda file, w, radius, annotate, timeout, quiet, brief: libMRP_wrappers.ecbs_ta(file, w, timeout=timeout, quiet=quiet),
     "mapf_prioritized_sipp": lambda file, w, radius, annotate, timeout, quiet, brief: libMRP_wrappers.mapf_prioritized_sipp(file, timeout=timeout, quiet=quiet),
     "mcts_nonoverlap": lambda file, w, radius, annotate, timeout, quiet, brief: mcts_wrappers.mcts_nonoverlap(file, timeout=timeout, quiet=quiet),
+    "lazycbs": lambda file, w, radius, annotate, timeout, quiet, brief: lazycbs_wrappers.lazycbs(file, timeout=timeout, quiet=quiet),
 }
 # MovingAI solvers read the MovingAI map and scenario files themselves, given
 # (scen_file, n_agents): the problem of the first n_agents agents of scen_file
@@ -31,6 +33,7 @@ MOVINGAI_SOLVERS = {
     "cbsh2_rtc_bp": lambda instance, w, radius, annotate, timeout, quiet, brief: chbp_wrappers.cbsh2_rtc_bp(*instance, timeout=timeout, quiet=quiet),
     "cbsh2_rtc_chbp": lambda instance, w, radius, annotate, timeout, quiet, brief: chbp_wrappers.cbsh2_rtc_chbp(*instance, timeout=timeout, quiet=quiet),
     "reloc": lambda instance, w, radius, annotate, timeout, quiet, brief: reloc_wrappers.reloc(*instance, timeout=timeout, quiet=quiet, brief=brief),
+    "bcp1": lambda instance, w, radius, annotate, timeout, quiet, brief: bcp1_wrappers.bcp1(*instance, timeout=timeout, quiet=quiet),
     "bcp2": lambda instance, w, radius, annotate, timeout, quiet, brief: bcp2_wrappers.bcp2(*instance, timeout=timeout, quiet=quiet),
 }
 # Roadmap solvers a roadmap yaml (agents with vertex names).
@@ -53,7 +56,9 @@ def solver_binary(solver):
         "cbsh2_rtc_bp": chbp_wrappers.CHBP_BINARY,
         "cbsh2_rtc_chbp": chbp_wrappers.CHBP_BINARY,
         "reloc": reloc_wrappers.RELOC_BINARY,
+        "bcp1": bcp1_wrappers.BCP1_BINARY,
         "bcp2": bcp2_wrappers.BCP2_BINARY,
+        "lazycbs": lazycbs_wrappers.LAZYCBS_BINARY,
     }[solver]
 
 
