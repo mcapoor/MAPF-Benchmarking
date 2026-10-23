@@ -34,7 +34,7 @@ The problems are the [MovingAI MAPF benchmarks](https://movingai.com/benchmarks/
 
 ## Usage
 
-1. **Build** (CMake, Boost, yaml-cpp, a C++23 compiler and Gurobi; bcp1 downloads SCIP; on Oscar `module load python boost yaml-cpp gurobi`):
+1. **Build** (CMake, Boost, yaml-cpp, a C++23 compiler and Gurobi; bcp1 downloads SCIP; on Oscar `module load python cmake boost yaml-cpp gurobi`):
 
    ```sh
    git clone --recurse-submodules git@github.com:mcapoor/MAPF-Benchmarking.git && cd MAPF-Benchmarking

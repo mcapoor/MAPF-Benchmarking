@@ -26,7 +26,7 @@
 # somewhere else.
 # Set CC/CXX to choose the compiler and JOBS the number of parallel jobs
 # (default: all cores; lower it if the bcp2 build runs out of memory).
-# On the Oscar cluster, `module load boost yaml-cpp gurobi` first. The solvers
+# On the Oscar cluster, `module load cmake boost yaml-cpp gurobi` first. The solvers
 # must be built on the machine that runs them.
 #
 # Every library is attempted even if an earlier one fails; the exit status is
@@ -67,8 +67,9 @@ done
 
 ensure_submodule() {
     local dir="$LIBS_DIR/$1"
-    # a submodule that has not been cloned is an empty directory
-    if [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+    # a submodule that has not been cloned is an empty directory; one cloned without --recursive lists its own
+    # submodules that are not cloned yet with a leading "-"
+    if [ -z "$(ls -A "$dir" 2>/dev/null)" ] || git -C "$dir" submodule status --recursive | grep -q '^-'; then
         echo "initializing submodule libs/$1"
         git -C "$ROOT_DIR" submodule update --init --recursive -- "libs/$1" || return 1
     fi
@@ -152,7 +153,8 @@ build_bcp1() {
     sed -i 's|EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/.git|EXISTS \\"${CMAKE_CURRENT_SOURCE_DIR}/.git\\"|; s|WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}$|WORKING_DIRECTORY \\"${CMAKE_CURRENT_SOURCE_DIR}\\"|' \
         "$dir/scipoptsuite-9.2.0/scip/CMakeLists.txt"
     library=$(ls "$gurobi"/lib/libgurobi*.so | grep -E '/libgurobi[0-9]+\.so$' | sort -V | tail -1)
-    cmake -S "$dir" -B "$dir/build" -DCMAKE_BUILD_TYPE=Release \
+    # SCIP's readline only serves its interactive shell, which bcp1 does not use (and Oscar has no readline headers)
+    cmake -S "$dir" -B "$dir/build" -DCMAKE_BUILD_TYPE=Release -DREADLINE=OFF \
           -DGUROBI_DIR="$gurobi" -DGUROBI_LIBRARY="$library" &&
     cmake --build "$dir/build" --target bcp-mapf -j "$JOBS"
 }
